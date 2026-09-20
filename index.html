@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
+    <title>RadioWave · Bootstrap</title>
+    <!-- Bootstrap 5 + Icons -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <link href="style.css" rel="stylesheet">
+</head>
+
+<body>
+
+    <!-- ========== FIXED HEADER ========== -->
+    <header class="app-header-fixed">
+        <div class="brand">
+            <i class="bi bi-broadcast"></i> RadioWave
+        </div>
+        <div class="nav-links">
+            <a id="mainPageLink" class="active">Home</a>
+            <a id="searchPageLink">Search</a>
+            <button class="btn btn-outline-light btn-sm ms-2" data-bs-toggle="modal" data-bs-target="#addStationModal">
+                <i class="bi bi-plus-circle"></i> Add
+            </button>
+        </div>
+    </header>
+
+    <!-- ========== MAIN CONTENT ========== -->
+    <main class="container-fluid px-3 px-md-4">
+
+        <!-- ===== HOME PAGE ===== -->
+        <div id="mainPage" class="page-container active">
+            <div class="filter-bar d-flex align-items-center justify-content-between flex-wrap">
+                <div class="filter-group">
+                    <button class="filter-btn famous active" data-filter="famous">⭐ Famous Radio</button>
+                    <span style="color:#4a4a56; margin:0 4px;">|</span>
+                    <button class="filter-btn" data-filter="rock">🎸 Rock</button>
+                    <button class="filter-btn" data-filter="pop">🎤 Pop</button>
+                    <button class="filter-btn" data-filter="jazz">🎷 Jazz</button>
+                    <button class="filter-btn" data-filter="classical">🎻 Classical</button>
+                    <button class="filter-btn" data-filter="electronic">⚡ Electronic</button>
+                    <button class="filter-btn" data-filter="talk">🗣 Talk</button>
+                    <button class="filter-btn" data-filter="indie">🎧 Indie</button>
+                    <button class="filter-btn" data-filter="ambient">🌊 Ambient</button>
+                    <button class="filter-btn" data-filter="folk">🪕 Folk</button>
+                </div>
+                <div>
+                    <span class="text-secondary" style="font-size:0.8rem;" id="filterLabel">⭐ Famous Radio</span>
+                </div>
+            </div>
+
+            <div class="station-list-container">
+                <div id="stationGrid" class="station-grid"></div>
+            </div>
+
+            <nav aria-label="Station pagination" class="mt-3 d-flex justify-content-center">
+                <ul class="pagination pagination-custom" id="paginationControls">
+                    <li class="page-item" id="prevPageItem"><a class="page-link" id="prevPageBtn"><i
+                                class="bi bi-chevron-left"></i></a></li>
+                    <li class="page-item disabled"><a class="page-link" id="pageInfo">1 / 1</a></li>
+                    <li class="page-item" id="nextPageItem"><a class="page-link" id="nextPageBtn"><i
+                                class="bi bi-chevron-right"></i></a></li>
+                </ul>
+            </nav>
+        </div>
+
+        <!-- ===== SEARCH PAGE ===== -->
+        <div id="searchPage" class="page-container">
+            <div class="filter-bar d-flex align-items-center flex-wrap gap-2">
+                <div class="input-group" style="flex: 2 1 200px;">
+                    <span class="input-group-text"><i class="bi bi-search"></i></span>
+                    <input type="text" class="form-control" id="searchInput" placeholder="Search by name...">
+                </div>
+                <select class="form-select form-select-sm" id="genreFilter" style="width:130px;">
+                    <option value="">Genre</option>
+                </select>
+                <select class="form-select form-select-sm" id="languageFilter" style="width:130px;">
+                    <option value="">Language</option>
+                </select>
+                <button class="btn btn-outline-light btn-sm" id="searchBtn"><i class="bi bi-arrow-right"></i>
+                    Search</button>
+                <button class="btn btn-outline-secondary btn-sm" id="clearSearchBtn">Clear</button>
+            </div>
+
+            <div class="station-list-container">
+                <div id="searchStationGrid" class="station-grid"></div>
+            </div>
+
+            <nav aria-label="Search pagination" class="mt-3 d-flex justify-content-center">
+                <ul class="pagination pagination-custom" id="searchPagination">
+                    <li class="page-item" id="searchPrevPage"><a class="page-link" id="searchPrevBtn"><i
+                                class="bi bi-chevron-left"></i></a></li>
+                    <li class="page-item disabled"><a class="page-link" id="searchPageInfo">1 / 1</a></li>
+                    <li class="page-item" id="searchNextPage"><a class="page-link" id="searchNextBtn"><i
+                                class="bi bi-chevron-right"></i></a></li>
+                </ul>
+            </nav>
+        </div>
+    </main>
+
+    <!-- ========== FIXED PLAYER BAR ========== -->
+    <div class="player-bar-fixed d-flex align-items-center justify-content-between flex-wrap gap-2">
+        <div class="track-info d-flex align-items-center gap-2" style="flex: 1 1 150px; min-width:0;">
+            <i class="bi bi-headphones" style="color:#6c8cff; font-size:1.4rem;"></i>
+            <div class="text-truncate">
+                <div class="station-name" id="currentStationName">Select a station</div>
+                <div class="now-playing-label"><i class="bi bi-play-circle-fill"></i> live stream</div>
+            </div>
+        </div>
+        <div class="player-controls d-flex align-items-center gap-2 flex-wrap justify-content-end">
+            <input type="range" min="0" max="1" step="0.05" value="0.8" class="volume-slider" id="volumeSlider">
+            <button class="btn btn-play" id="playPauseBtn"><i class="bi bi-play-fill"></i></button>
+            <button class="btn" id="stopBtn"><i class="bi bi-stop-fill"></i></button>
+        </div>
+    </div>
+
+    <!-- ========== ADD STATION MODAL ========== -->
+    <div class="modal fade" id="addStationModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="bi bi-plus-circle" style="color:#6c8cff;"></i> Add radio station
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">Station name *</label>
+                        <input type="text" class="form-control" id="stationNameInput" placeholder="e.g. Radio Nova">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Stream URL *</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="stationUrlInput"
+                                placeholder="https://example.com/stream.mp3">
+                            <button class="btn btn-outline-secondary btn-paste-url" type="button" id="pasteUrlBtn"
+                                title="Paste from clipboard">
+                                <i class="bi bi-clipboard"></i> Paste
+                            </button>
+                            <button class="btn btn-outline-secondary btn-check-url" type="button" id="checkUrlBtn">
+                                <i class="bi bi-check-circle"></i> Check
+                            </button>
+                        </div>
+                        <div id="urlStatus" class="url-status"></div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Genre *</label>
+                        <select class="form-select" id="stationGenreSelect">
+                            <option value="">Select genre...</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Language *</label>
+                        <select class="form-select" id="stationLanguageSelect">
+                            <option value="">Select language...</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Description</label>
+                        <textarea class="form-control" id="stationDescriptionInput" rows="3"
+                            placeholder="Station description (optional)"></textarea>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Station image (optional)</label>
+                        <input type="file" class="form-control" id="stationImageInput" accept="image/*">
+                        <div class="image-preview" id="imagePreview">
+                            <i class="bi bi-image placeholder-icon"></i>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="submitStationBtn"><i class="bi bi-check-lg"></i>
+                        Add station</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- toast container -->
+    <div class="toast-container position-fixed bottom-0 end-0 p-3">
+        <div id="liveToast" class="toast align-items-center text-white border-0" role="alert" aria-live="assertive"
+            aria-atomic="true" style="background:#1e1e2a;">
+            <div class="d-flex">
+                <div class="toast-body" id="toastMessage">Station added!</div>
+                <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- ========== MAIN JAVASCRIPT ========== -->
+    <script src="script.js"></script>
+</body>
+
+</html>
