@@ -3,10 +3,10 @@ FROM nginx:alpine
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-COPY index.html /usr/share/nginx/html/
-COPY style.css /usr/share/nginx/html/
-COPY script.js /usr/share/nginx/html/
+COPY index.html style.css script.js config.js /usr/share/nginx/html/
 
+# Generates config.js from the API_BASE env var on container start
+COPY --chmod=755 docker/40-radiowave-config.sh /docker-entrypoint.d/40-radiowave-config.sh
 
 EXPOSE 80
 

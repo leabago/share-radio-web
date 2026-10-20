@@ -1,0 +1,22 @@
+# middleware.yaml
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: share-radio-strip
+  namespace: share-radio
+spec:
+  stripPrefix:
+    prefixes:
+      - "/radio"
+---
+# /radio -> /radio/ so relative links (style.css, script.js) resolve under /radio/
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: share-radio-slash
+  namespace: share-radio
+spec:
+  redirectRegex:
+    regex: "^(https?://[^/]+/radio)(\\?.*)?$"
+    replacement: "${1}/${2}"
+    permanent: true

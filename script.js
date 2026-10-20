@@ -1,25 +1,50 @@
 (function () {
     'use strict';
 
-    const API_BASE = 'http://localhost:8080';
+    // API address comes from config.js (generated from the API_BASE env var in Docker).
+    const config = window.RADIOWAVE_CONFIG || {};
+    const API_BASE = (config.apiBase || 'http://localhost:8080').replace(/\/+$/, '');
     const CACHE_KEY_GENRES = 'radiowave_genres';
     const CACHE_KEY_LANGUAGES = 'radiowave_languages';
     const CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
+    const LIMIT = 12;
+    const URL_CHECK_TIMEOUT = 15000;
+
+    const ICON_PLAY = '<i class="bi bi-play-fill"></i>';
+    const ICON_PAUSE = '<i class="bi bi-pause-fill"></i>';
+    const IMAGE_PLACEHOLDER = '<i class="bi bi-image placeholder-icon"></i>';
+
+    const FALLBACK_GENRES = [
+        { id: 'rock-id', name: 'rock' },
+        { id: 'pop-id', name: 'pop' },
+        { id: 'jazz-id', name: 'jazz' },
+        { id: 'classical-id', name: 'classical' },
+        { id: 'electronic-id', name: 'electronic' },
+        { id: 'talk-id', name: 'talk' },
+        { id: 'indie-id', name: 'indie' },
+        { id: 'ambient-id', name: 'ambient' },
+        { id: 'folk-id', name: 'folk' },
+    ];
+    const FALLBACK_LANGUAGES = [
+        { id: 'en-id', name: 'English' },
+        { id: 'ru-id', name: 'Russian' },
+        { id: 'fr-id', name: 'French' },
+        { id: 'de-id', name: 'German' },
+        { id: 'es-id', name: 'Spanish' },
+        { id: 'ja-id', name: 'Japanese' },
+    ];
 
     // ---- Session management ----
     function getOrCreateSessionId() {
-        let sessionId = localStorage.getItem('radioSession');
+        let sessionId = null;
+        try { sessionId = localStorage.getItem('radioSession'); } catch (e) { /* storage blocked */ }
         if (!sessionId) {
             sessionId = 'session-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
-            localStorage.setItem('radioSession', sessionId);
-            console.log('🆕 New session created:', sessionId);
-        } else {
-            console.log('♻️ Existing session found:', sessionId);
+            try { localStorage.setItem('radioSession', sessionId); } catch (e) { /* storage blocked */ }
         }
         return sessionId;
     }
 
-    // Create session immediately when script loads
     const SESSION_ID = getOrCreateSessionId();
 
     // ---- state ----
@@ -32,22 +57,25 @@
     let homePage = 0;
     let homeTotal = 0;
     let homeFilter = 'famous';
+    let homeRequestSeq = 0;
 
     // Search page state
     let searchPageNum = 0;
     let searchResults = [];
     let searchTotal = 0;
+    let searchRequestSeq = 0;
 
-    // URL validation state - track the validated URL
+    // URL validation state
     let validatedUrl = null;
     let urlValid = false;
-    let urlChecking = false;
+    let validationSeq = 0;
+    let urlCheckTimeout = null;
 
-    const LIMIT = 12;
+    let submitting = false;
+
     let genres = [];
     let languages = [];
     let genreMap = {};
-    let languageMap = {};
 
     // DOM refs
     const mainPage = document.getElementById('mainPage');
@@ -85,6 +113,7 @@
     const urlStatus = document.getElementById('urlStatus');
 
     // Add station modal fields
+    const addStationModal = document.getElementById('addStationModal');
     const stationNameInput = document.getElementById('stationNameInput');
     const stationUrlInput = document.getElementById('stationUrlInput');
     const stationGenreSelect = document.getElementById('stationGenreSelect');
@@ -104,7 +133,7 @@
             const raw = localStorage.getItem(key);
             if (!raw) return null;
             const data = JSON.parse(raw);
-            if (Date.now() - data.timestamp > CACHE_TTL) {
+            if (Date.now() - data.timestamp > CACHE_TTL || !Array.isArray(data.value) || data.value.length === 0) {
                 localStorage.removeItem(key);
                 return null;
             }
@@ -113,14 +142,15 @@
     }
 
     function setCachedData(key, value) {
+        if (!Array.isArray(value) || value.length === 0) return;
         try {
             localStorage.setItem(key, JSON.stringify({ timestamp: Date.now(), value }));
         } catch (e) { /* ignore */ }
     }
 
     function escapeHtml(text) {
-        if (!text) return '';
-        return String(text).replace(/[&<>"]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m] || m));
+        if (text === null || text === undefined) return '';
+        return String(text).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
     }
 
     function showToast(msg) {
@@ -128,313 +158,185 @@
         toast.show();
     }
 
+    // Reads an error message from a failed response, even if the body isn't JSON.
+    async function readError(res) {
+        try {
+            const data = await res.json();
+            if (data && data.error) return data.error;
+        } catch (e) { /* not JSON */ }
+        return `HTTP ${res.status}`;
+    }
+
     // ---- Paste functionality ----
     async function pasteFromClipboard() {
+        if (!navigator.clipboard || !navigator.clipboard.readText) {
+            showToast('Clipboard access is not available. Please use Ctrl+V (Cmd+V on Mac).');
+            return;
+        }
         try {
-            const text = await navigator.clipboard.readText();
-            if (text) {
-                stationUrlInput.value = text;
-                // Reset validation state when pasting
-                resetValidationState();
-                // Trigger input event to auto-check
-                stationUrlInput.dispatchEvent(new Event('input'));
-                showToast('URL pasted successfully!');
+            const text = (await navigator.clipboard.readText()).trim();
+            if (!text) {
+                showToast('Clipboard is empty.');
+                return;
             }
+            stationUrlInput.value = text;
+            stationUrlInput.dispatchEvent(new Event('input'));
+            showToast('URL pasted successfully!');
         } catch (err) {
-            try {
-                const pasteTarget = document.createElement('textarea');
-                document.body.appendChild(pasteTarget);
-                pasteTarget.focus();
-                document.execCommand('paste');
-                const pastedText = pasteTarget.value;
-                document.body.removeChild(pasteTarget);
-                if (pastedText) {
-                    stationUrlInput.value = pastedText;
-                    resetValidationState();
-                    stationUrlInput.dispatchEvent(new Event('input'));
-                    showToast('URL pasted successfully!');
-                }
-            } catch (fallbackErr) {
-                showToast('Unable to paste. Please use Ctrl+V (Cmd+V on Mac).');
-            }
+            showToast('Clipboard access was blocked. Please use Ctrl+V (Cmd+V on Mac).');
         }
     }
 
-    // ---- Reset validation state ----
+    // ---- URL validation ----
+    function setUrlStatus(state, message) {
+        urlStatus.textContent = message || '';
+        urlStatus.className = state ? `url-status ${state}` : 'url-status';
+        stationUrlInput.classList.remove('url-valid', 'url-invalid', 'url-checking');
+        if (state) stationUrlInput.classList.add(`url-${state}`);
+    }
+
     function resetValidationState() {
+        clearTimeout(urlCheckTimeout);
+        validationSeq++; // results of checks still running are now ignored
         validatedUrl = null;
         urlValid = false;
-        urlChecking = false;
-        urlStatus.textContent = '';
-        urlStatus.className = 'url-status';
-        stationUrlInput.className = 'form-control';
+        setUrlStatus(null, '');
     }
 
-    // ---- SIMPLIFIED URL VALIDATION ----
-    async function validateStreamUrl(url) {
-        if (!url || !url.trim()) {
-            urlStatus.textContent = 'Please enter a URL.';
-            urlStatus.className = 'url-status invalid';
-            urlValid = false;
-            validatedUrl = null;
-            stationUrlInput.classList.remove('url-valid', 'url-invalid', 'url-checking');
-            return false;
+    function validateStreamUrl(url) {
+        resetValidationState();
+        if (!url) {
+            setUrlStatus('invalid', 'Please enter a URL.');
+            return Promise.resolve(false);
         }
 
-        urlChecking = true;
-        urlValid = false;
-        validatedUrl = null;
-        urlStatus.textContent = 'Checking stream...';
-        urlStatus.className = 'url-status checking';
-        stationUrlInput.className = 'form-control url-checking';
+        const seq = validationSeq;
+        setUrlStatus('checking', 'Checking stream...');
 
         return new Promise((resolve) => {
             const testAudio = new Audio();
-            testAudio.crossOrigin = 'anonymous';
-            testAudio.src = url;
+            let finished = false;
 
-            const timeoutId = setTimeout(() => {
-                testAudio.removeEventListener('loadedmetadata', onSuccess);
-                testAudio.removeEventListener('error', onError);
-                testAudio.src = '';
-                urlChecking = false;
-                urlValid = false;
-                validatedUrl = null;
-                urlStatus.textContent = '❌ Connection timeout. Stream is slow or unavailable.';
-                urlStatus.className = 'url-status invalid';
-                stationUrlInput.className = 'form-control url-invalid';
-                resolve(false);
-            }, 15000);
-
-            function onSuccess() {
+            function finish(ok, message) {
+                if (finished) return;
+                finished = true;
                 clearTimeout(timeoutId);
                 testAudio.removeEventListener('loadedmetadata', onSuccess);
                 testAudio.removeEventListener('error', onError);
-                testAudio.src = '';
-                urlChecking = false;
-                urlValid = true;
-                validatedUrl = url;
-                urlStatus.textContent = '✅ Stream is valid and can play!';
-                urlStatus.className = 'url-status valid';
-                stationUrlInput.className = 'form-control url-valid';
-                resolve(true);
+                testAudio.removeAttribute('src');
+                testAudio.load();
+
+                // A newer check (or a URL change) has started since this one: drop the result.
+                if (seq !== validationSeq) { resolve(false); return; }
+
+                urlValid = ok;
+                validatedUrl = ok ? url : null;
+                setUrlStatus(ok ? 'valid' : 'invalid', message);
+                resolve(ok);
             }
 
-            function onError() {
-                clearTimeout(timeoutId);
-                testAudio.removeEventListener('loadedmetadata', onSuccess);
-                testAudio.removeEventListener('error', onError);
-                testAudio.src = '';
-                urlChecking = false;
-                urlValid = false;
-                validatedUrl = null;
-                urlStatus.textContent = '❌ Cannot play this stream. Please check the URL.';
-                urlStatus.className = 'url-status invalid';
-                stationUrlInput.className = 'form-control url-invalid';
-                resolve(false);
-            }
+            function onSuccess() { finish(true, '✅ Stream is valid and can play!'); }
+            function onError() { finish(false, '❌ Cannot play this stream. Please check the URL.'); }
+
+            const timeoutId = setTimeout(
+                () => finish(false, '❌ Connection timeout. Stream is slow or unavailable.'),
+                URL_CHECK_TIMEOUT
+            );
 
             testAudio.addEventListener('loadedmetadata', onSuccess);
             testAudio.addEventListener('error', onError);
+            testAudio.src = url;
             testAudio.load();
         });
     }
 
-    // ---- API ----
-    async function fetchGenres() {
-        const cached = getCachedData(CACHE_KEY_GENRES);
-        if (cached) {
-            genres = cached;
-            buildGenreMap();
-            populateGenreFilter();
-            populateGenreSelect();
-            return;
-        }
+    // ---- Genres & languages ----
+    async function loadList(cacheKey, path, field, fallback) {
+        const cached = getCachedData(cacheKey);
+        if (cached) return cached;
         try {
-            const res = await fetch(`${API_BASE}/genres`);
+            const res = await fetch(`${API_BASE}${path}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
-            genres = data.genres || [];
-            setCachedData(CACHE_KEY_GENRES, genres);
-            buildGenreMap();
-            populateGenreFilter();
-            populateGenreSelect();
+            const list = Array.isArray(data[field]) ? data[field] : [];
+            if (list.length === 0) throw new Error(`Empty ${field} list`);
+            setCachedData(cacheKey, list);
+            return list;
         } catch (e) {
-            console.warn('Genres fallback:', e);
-            genres = [
-                { id: 'rock-id', name: 'rock' },
-                { id: 'pop-id', name: 'pop' },
-                { id: 'jazz-id', name: 'jazz' },
-                { id: 'classical-id', name: 'classical' },
-                { id: 'electronic-id', name: 'electronic' },
-                { id: 'talk-id', name: 'talk' },
-                { id: 'indie-id', name: 'indie' },
-                { id: 'ambient-id', name: 'ambient' },
-                { id: 'folk-id', name: 'folk' },
-            ];
-            buildGenreMap();
-            populateGenreFilter();
-            populateGenreSelect();
+            console.warn(`${field} fallback:`, e);
+            return fallback;
         }
     }
 
-    async function fetchLanguages() {
-        const cached = getCachedData(CACHE_KEY_LANGUAGES);
-        if (cached) {
-            languages = cached;
-            buildLanguageMap();
-            populateLanguageFilter();
-            populateLanguageSelect();
-            return;
-        }
-        try {
-            const res = await fetch(`${API_BASE}/languages`);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json();
-            languages = data.languages || [];
-            setCachedData(CACHE_KEY_LANGUAGES, languages);
-            buildLanguageMap();
-            populateLanguageFilter();
-            populateLanguageSelect();
-        } catch (e) {
-            console.warn('Languages fallback:', e);
-            languages = [
-                { id: 'en-id', name: 'English' },
-                { id: 'ru-id', name: 'Russian' },
-                { id: 'fr-id', name: 'French' },
-                { id: 'de-id', name: 'German' },
-                { id: 'es-id', name: 'Spanish' },
-                { id: 'ja-id', name: 'Japanese' },
-            ];
-            buildLanguageMap();
-            populateLanguageFilter();
-            populateLanguageSelect();
-        }
-    }
-
-    function buildGenreMap() {
-        genreMap = {};
-        genres.forEach(g => { genreMap[g.name.toLowerCase()] = g.id; });
-    }
-
-    function buildLanguageMap() {
-        languageMap = {};
-        languages.forEach(l => { languageMap[l.name.toLowerCase()] = l.id; });
-    }
-
-    function populateGenreFilter() {
-        const val = genreFilter.value;
-        genreFilter.innerHTML = '<option value="">Genre</option>';
-        genres.forEach(g => {
-            const opt = document.createElement('option');
-            opt.value = g.id;
-            opt.textContent = g.name;
-            genreFilter.appendChild(opt);
-        });
-        if (val) genreFilter.value = val;
-    }
-
-    function populateLanguageFilter() {
-        const val = languageFilter.value;
-        languageFilter.innerHTML = '<option value="">Language</option>';
-        languages.forEach(l => {
-            const opt = document.createElement('option');
-            opt.value = l.id;
-            opt.textContent = l.name;
-            languageFilter.appendChild(opt);
-        });
-        if (val) languageFilter.value = val;
-    }
-
-    function populateGenreSelect() {
-        const val = stationGenreSelect.value;
-        stationGenreSelect.innerHTML = '<option value="">Select genre...</option>';
-        genres.forEach(g => {
-            const opt = document.createElement('option');
-            opt.value = g.id;
-            opt.textContent = g.name;
-            stationGenreSelect.appendChild(opt);
-        });
-        if (val) stationGenreSelect.value = val;
-    }
-
-    function populateLanguageSelect() {
-        const val = stationLanguageSelect.value;
-        stationLanguageSelect.innerHTML = '<option value="">Select language...</option>';
-        languages.forEach(l => {
-            const opt = document.createElement('option');
-            opt.value = l.id;
-            opt.textContent = l.name;
-            stationLanguageSelect.appendChild(opt);
-        });
-        if (val) stationLanguageSelect.value = val;
+    function fillSelect(select, placeholder, items) {
+        const val = select.value;
+        select.innerHTML = '';
+        select.appendChild(new Option(placeholder, ''));
+        items.forEach(item => select.appendChild(new Option(item.name, item.id)));
+        if (val) select.value = val;
     }
 
     function getGenreId(name) {
         return genreMap[name.toLowerCase()] || name;
     }
 
-    function getLanguageId(name) {
-        return languageMap[name.toLowerCase()] || name;
+    // ---- Station API calls ----
+    function getTotal(data) {
+        return Number((data.pagination && data.pagination.total) || data.total) || 0;
     }
 
-    // ---- API calls ----
     async function fetchHomeStations() {
+        const seq = ++homeRequestSeq;
         const params = { limit: LIMIT, offset: homePage * LIMIT };
+        if (homeFilter !== 'famous') params.genreId = getGenreId(homeFilter);
 
-        if (homeFilter === 'famous') {
-            // Famous radio - just fetch all stations
-        } else {
-            const genreId = getGenreId(homeFilter);
-            if (genreId) params.genreId = genreId;
-        }
-
-        const query = new URLSearchParams(params);
         try {
-            const res = await fetch(`${API_BASE}/stations?${query}`);
+            const res = await fetch(`${API_BASE}/stations?${new URLSearchParams(params)}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
+            if (seq !== homeRequestSeq) return; // a newer request replaced this one
             homeStations = data.stations || [];
-            homeTotal = data.pagination?.total || data.total || 0;
-            renderHomePage();
+            homeTotal = getTotal(data);
         } catch (e) {
+            if (seq !== homeRequestSeq) return;
             console.error('Home fetch error:', e);
             showToast('Failed to load stations.');
             homeStations = [];
             homeTotal = 0;
-            renderHomePage();
         }
+        renderHomePage();
     }
 
     async function fetchSearchStations() {
+        const seq = ++searchRequestSeq;
         const params = { limit: LIMIT, offset: searchPageNum * LIMIT };
         const search = searchInput.value.trim();
-        const genreId = genreFilter.value;
-        const languageId = languageFilter.value;
         if (search) params.search = search;
-        if (genreId) params.genreId = genreId;
-        if (languageId) params.languageId = languageId;
+        if (genreFilter.value) params.genreId = genreFilter.value;
+        if (languageFilter.value) params.languageId = languageFilter.value;
 
-        const query = new URLSearchParams(params);
         try {
-            const res = await fetch(`${API_BASE}/stations?${query}`);
+            const res = await fetch(`${API_BASE}/stations?${new URLSearchParams(params)}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
+            if (seq !== searchRequestSeq) return;
             searchResults = data.stations || [];
-            searchTotal = data.pagination?.total || data.total || 0;
-            renderSearchPage();
+            searchTotal = getTotal(data);
         } catch (e) {
+            if (seq !== searchRequestSeq) return;
             console.error('Search error:', e);
+            showToast('Search failed.');
             searchResults = [];
             searchTotal = 0;
-            renderSearchPage();
         }
+        renderSearchPage();
     }
 
-    async function createStation(name, url, genreId, languageId, description, imageData) {
+    async function createStation(name, url, genreId, languageId, description, imageFile) {
         const payload = { name, url, genreId, languageId };
         if (description) payload.description = description;
 
+        let data;
         try {
             const res = await fetch(`${API_BASE}/stations`, {
                 method: 'POST',
@@ -444,109 +346,139 @@
                 },
                 body: JSON.stringify(payload)
             });
-            if (!res.ok) {
-                const err = await res.json();
-                throw new Error(err.error || `HTTP ${res.status}`);
-            }
-            const data = await res.json();
-            if (imageData && data.id) {
-                try {
-                    const blob = dataURLtoBlob(imageData);
-                    const formData = new FormData();
-                    formData.append('file', blob, 'icon.png');
-                    await fetch(`${API_BASE}/stations/${data.id}/icon`, {
-                        method: 'POST',
-                        headers: {
-                            'X-Session-Id': SESSION_ID
-                        },
-                        body: formData
-                    });
-                } catch (iconErr) { console.warn('Icon upload failed:', iconErr); }
-            }
-            showToast(`Station "${name}" added!`);
-            // Refresh current page
-            if (mainPage.classList.contains('active')) {
-                fetchHomeStations();
-            } else {
-                fetchSearchStations();
-            }
-            return true;
+            if (!res.ok) throw new Error(await readError(res));
+            data = await res.json();
         } catch (e) {
             showToast(`Error: ${e.message}`);
             return false;
         }
-    }
 
-    function dataURLtoBlob(dataURL) {
-        const arr = dataURL.split(',');
-        const mime = arr[0].match(/:(.*?);/)[1];
-        const bstr = atob(arr[1]);
-        let n = bstr.length;
-        const u8arr = new Uint8Array(n);
-        while (n--) u8arr[n] = bstr.charCodeAt(n);
-        return new Blob([u8arr], { type: mime });
+        let iconError = null;
+        if (imageFile && data && data.id) {
+            try {
+                const formData = new FormData();
+                formData.append('file', imageFile, imageFile.name);
+                const iconRes = await fetch(`${API_BASE}/stations/${encodeURIComponent(data.id)}/icon`, {
+                    method: 'POST',
+                    headers: { 'X-Session-Id': SESSION_ID },
+                    body: formData
+                });
+                if (!iconRes.ok) throw new Error(await readError(iconRes));
+            } catch (e) {
+                console.warn('Icon upload failed:', e);
+                iconError = e.message;
+            }
+        }
+
+        showToast(iconError
+            ? `Station "${name}" added, but the image upload failed: ${iconError}`
+            : `Station "${name}" added!`);
+
+        if (isMainPageActive()) fetchHomeStations();
+        else fetchSearchStations();
+        return true;
     }
 
     // ---- Rendering ----
-    function renderHomePage() {
-        const start = homePage * LIMIT;
-        const end = Math.min(start + LIMIT, homeStations.length);
-        const items = homeStations.slice(start, end);
+    function isMainPageActive() {
+        return mainPage.classList.contains('active');
+    }
 
-        grid.innerHTML = '';
-        if (items.length === 0) {
-            grid.innerHTML = `<div class="text-center text-secondary py-5" style="grid-column:1/-1;">No stations found</div>`;
+    function renderActivePage() {
+        if (isMainPageActive()) renderHomePage();
+        else renderSearchPage();
+    }
+
+    function setPagerItem(item, link, disabled) {
+        item.classList.toggle('disabled', disabled);
+        link.setAttribute('aria-disabled', String(disabled));
+        link.tabIndex = disabled ? -1 : 0;
+    }
+
+    // The API already returns one page, so the list is rendered as-is.
+    function renderStations(container, stations, page, total, info, prevItem, prevLink, nextItem, nextLink) {
+        container.innerHTML = '';
+        if (stations.length === 0) {
+            container.innerHTML = '<div class="text-center text-secondary py-5" style="grid-column:1/-1;">No stations found</div>';
         } else {
-            items.forEach(st => renderCard(grid, st));
+            stations.forEach(st => renderCard(container, st));
         }
 
-        const totalPages = Math.ceil(homeTotal / LIMIT) || 1;
-        pageInfo.textContent = `${homePage + 1} / ${totalPages}`;
-        prevPageItem.classList.toggle('disabled', homePage === 0);
-        nextPageItem.classList.toggle('disabled', homePage >= totalPages - 1);
+        const totalPages = Math.ceil(total / LIMIT) || 1;
+        info.textContent = `${page + 1} / ${totalPages}`;
+        setPagerItem(prevItem, prevLink, page === 0);
+        setPagerItem(nextItem, nextLink, page >= totalPages - 1);
+    }
+
+    function renderHomePage() {
+        renderStations(grid, homeStations, homePage, homeTotal,
+            pageInfo, prevPageItem, prevPageBtn, nextPageItem, nextPageBtn);
     }
 
     function renderSearchPage() {
-        const start = searchPageNum * LIMIT;
-        const end = Math.min(start + LIMIT, searchResults.length);
-        const items = searchResults.slice(start, end);
-
-        searchGrid.innerHTML = '';
-        if (items.length === 0) {
-            searchGrid.innerHTML = `<div class="text-center text-secondary py-5" style="grid-column:1/-1;">No stations found</div>`;
-        } else {
-            items.forEach(st => renderCard(searchGrid, st));
-        }
-
-        const totalPages = Math.ceil(searchTotal / LIMIT) || 1;
-        searchPageInfo.textContent = `${searchPageNum + 1} / ${totalPages}`;
-        searchPrevPage.classList.toggle('disabled', searchPageNum === 0);
-        searchNextPage.classList.toggle('disabled', searchPageNum >= totalPages - 1);
+        renderStations(searchGrid, searchResults, searchPageNum, searchTotal,
+            searchPageInfo, searchPrevPage, searchPrevBtn, searchNextPage, searchNextBtn);
     }
 
     function renderCard(container, st) {
+        const isCurrent = currentStationId === st.id;
         const card = document.createElement('div');
-        card.className = `station-card ${currentStationId === st.id ? 'active' : ''}`;
+        card.className = `station-card${isCurrent ? ' active' : ''}`;
         card.dataset.id = st.id;
-        let artworkHtml = st.icon ? `<img src="${st.icon}" alt="${escapeHtml(st.name)}">` : `<i class="bi bi-radio"></i>`;
-        const genreName = genres.find(g => g.id === st.genre)?.name || st.genre || 'mixed';
-        const langName = languages.find(l => l.id === st.language)?.name || st.language || 'world';
+        card.tabIndex = 0;
+        card.setAttribute('role', 'button');
+        card.setAttribute('aria-label', `Play ${st.name || 'station'}`);
+        const artworkHtml = st.icon
+            ? `<img src="${escapeHtml(st.icon)}" alt="${escapeHtml(st.name)}">`
+            : '<i class="bi bi-radio"></i>';
+        const genreName = (genres.find(g => g.id === st.genre) || {}).name || st.genre || 'mixed';
+        const langName = (languages.find(l => l.id === st.language) || {}).name || st.language || 'world';
         card.innerHTML = `
                 <div class="artwork">${artworkHtml}</div>
                 <div class="station-name">${escapeHtml(st.name)}</div>
                 <span class="genre-tag">${escapeHtml(genreName)}</span>
                 <div class="country-flag"><i class="bi bi-geo-alt"></i> ${escapeHtml(langName)}</div>
-                <div class="play-indicator">${currentStationId === st.id && isPlaying ? '🔊 playing' : ''}</div>
+                <div class="play-indicator">${isCurrent && isPlaying ? '🔊 playing' : ''}</div>
             `;
         card.addEventListener('click', () => playStation(st.id));
+        card.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                playStation(st.id);
+            }
+        });
         container.appendChild(card);
     }
 
     // ---- Player ----
     function getStationById(id) {
-        let st = homeStations.find(s => s.id === id);
-        if (!st) st = searchResults.find(s => s.id === id);
-        return st;
+        return homeStations.find(s => s.id === id) || searchResults.find(s => s.id === id);
+    }
+
+    function setPlayingUI(playing) {
+        isPlaying = playing;
+        playPauseBtn.innerHTML = playing ? ICON_PAUSE : ICON_PLAY;
+        playPauseBtn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+        renderActivePage();
+    }
+
+    // Stops and detaches the current audio element. Clearing audioElement first
+    // makes its pause/error events ignored by the handlers below.
+    function releaseAudio() {
+        if (!audioElement) return;
+        const audio = audioElement;
+        audioElement = null;
+        audio.pause();
+        audio.removeAttribute('src');
+        audio.load();
+    }
+
+    function handlePlayError(audio, err) {
+        if (audio !== audioElement || (err && err.name === 'AbortError')) return;
+        setPlayingUI(false);
+        showToast(err && err.name === 'NotAllowedError'
+            ? 'Playback was blocked by the browser. Press play to start.'
+            : 'Could not start the stream.');
     }
 
     function playStation(stationId) {
@@ -558,32 +490,30 @@
             return;
         }
 
-        if (audioElement) {
-            audioElement.pause();
-            audioElement.src = '';
-            audioElement = null;
-            isPlaying = false;
-        }
+        releaseAudio();
 
-        const audio = new Audio(station.url);
+        const audio = new Audio();
         audio.volume = parseFloat(volumeSlider.value);
-        audio.crossOrigin = 'anonymous';
         audio.addEventListener('error', () => {
+            if (audio !== audioElement) return;
             showToast('Could not load stream.');
             resetPlayerUI();
         });
+        audio.addEventListener('playing', () => {
+            if (audio === audioElement && !isPlaying) setPlayingUI(true);
+        });
+        audio.addEventListener('pause', () => {
+            if (audio === audioElement && isPlaying) setPlayingUI(false);
+        });
+        audio.src = station.url;
 
         audioElement = audio;
         currentStationId = station.id;
         currentStationName.textContent = station.name;
-        playPauseBtn.innerHTML = '<i class="bi bi-pause-fill"></i>';
-        isPlaying = true;
-        audio.play().catch(() => { });
+        setPlayingUI(true);
+        audio.play().catch(err => handlePlayError(audio, err));
 
-        if (mainPage.classList.contains('active')) renderHomePage();
-        else renderSearchPage();
-
-        fetch(`${API_BASE}/stations/${stationId}/play`, {
+        fetch(`${API_BASE}/stations/${encodeURIComponent(stationId)}/play`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -594,58 +524,34 @@
     }
 
     function pauseAudio() {
-        if (audioElement) {
-            audioElement.pause();
-            isPlaying = false;
-            playPauseBtn.innerHTML = '<i class="bi bi-play-fill"></i>';
-            if (mainPage.classList.contains('active')) renderHomePage();
-            else renderSearchPage();
-        }
-    }
-
-    function stopAudio() {
-        if (audioElement) {
-            audioElement.pause();
-            audioElement.src = '';
-            audioElement = null;
-            isPlaying = false;
-            currentStationId = null;
-            currentStationName.textContent = 'Select a station';
-            playPauseBtn.innerHTML = '<i class="bi bi-play-fill"></i>';
-            if (mainPage.classList.contains('active')) renderHomePage();
-            else renderSearchPage();
-        }
+        if (!audioElement) return;
+        audioElement.pause();
+        setPlayingUI(false);
     }
 
     function resetPlayerUI() {
-        if (audioElement) {
-            audioElement.pause();
-            audioElement.src = '';
-            audioElement = null;
-        }
-        isPlaying = false;
+        releaseAudio();
         currentStationId = null;
         currentStationName.textContent = 'Select a station';
-        playPauseBtn.innerHTML = '<i class="bi bi-play-fill"></i>';
-        if (mainPage.classList.contains('active')) renderHomePage();
-        else renderSearchPage();
+        setPlayingUI(false);
+    }
+
+    function stopAudio() {
+        if (audioElement || currentStationId) resetPlayerUI();
     }
 
     function togglePlayPause() {
         if (!audioElement || !currentStationId) {
-            const first = mainPage.classList.contains('active') ? homeStations[0] : searchResults[0];
+            const first = isMainPageActive() ? homeStations[0] : searchResults[0];
             if (first) playStation(first.id);
             return;
         }
-        if (isPlaying) pauseAudio();
-        else {
-            if (audioElement) {
-                audioElement.play().catch(() => { });
-                isPlaying = true;
-                playPauseBtn.innerHTML = '<i class="bi bi-pause-fill"></i>';
-                if (mainPage.classList.contains('active')) renderHomePage();
-                else renderSearchPage();
-            }
+        if (isPlaying) {
+            pauseAudio();
+        } else {
+            const audio = audioElement;
+            setPlayingUI(true);
+            audio.play().catch(err => handlePlayError(audio, err));
         }
     }
 
@@ -666,185 +572,176 @@
         fetchSearchStations();
     }
 
-    // ---- Event binding ----
-    // Home filter buttons
-    document.querySelectorAll('#mainPage .filter-btn').forEach(btn => {
-        btn.addEventListener('click', function () {
-            document.querySelectorAll('#mainPage .filter-btn').forEach(b => b.classList.remove('active'));
-            this.classList.add('active');
-            homeFilter = this.dataset.filter;
-            homePage = 0;
-            const label = homeFilter === 'famous' ? '⭐ Famous Radio' : homeFilter.charAt(0).toUpperCase() + homeFilter.slice(1);
-            filterLabel.textContent = label;
-            fetchHomeStations();
-        });
-    });
-
-    // Page navigation
-    mainPageLink.addEventListener('click', (e) => { e.preventDefault(); showMainPage(); });
-    searchPageLink.addEventListener('click', (e) => { e.preventDefault(); showSearchPage(); });
-
-    // Home pagination
-    prevPageBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        if (homePage > 0) { homePage--; fetchHomeStations(); }
-    });
-    nextPageBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        const totalPages = Math.ceil(homeTotal / LIMIT);
-        if (homePage < totalPages - 1) { homePage++; fetchHomeStations(); }
-    });
-
-    // Search pagination
-    searchPrevBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        if (searchPageNum > 0) { searchPageNum--; fetchSearchStations(); }
-    });
-    searchNextBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        const totalPages = Math.ceil(searchTotal / LIMIT);
-        if (searchPageNum < totalPages - 1) { searchPageNum++; fetchSearchStations(); }
-    });
-
-    // Search controls
-    searchBtn.addEventListener('click', () => { searchPageNum = 0; fetchSearchStations(); });
-    clearSearchBtn.addEventListener('click', () => {
-        searchInput.value = '';
-        genreFilter.value = '';
-        languageFilter.value = '';
-        searchPageNum = 0;
-        fetchSearchStations();
-    });
-    searchInput.addEventListener('keyup', (e) => { if (e.key === 'Enter') { searchPageNum = 0; fetchSearchStations(); } });
-    genreFilter.addEventListener('change', () => { searchPageNum = 0; fetchSearchStations(); });
-    languageFilter.addEventListener('change', () => { searchPageNum = 0; fetchSearchStations(); });
-
-    // Player
-    playPauseBtn.addEventListener('click', togglePlayPause);
-    stopBtn.addEventListener('click', stopAudio);
-    volumeSlider.addEventListener('input', function () {
-        if (audioElement) audioElement.volume = parseFloat(this.value);
-    });
-
-    // Paste button
-    pasteUrlBtn.addEventListener('click', pasteFromClipboard);
-
-    // URL Check button
-    checkUrlBtn.addEventListener('click', async function () {
-        const url = stationUrlInput.value.trim();
-        if (!url) {
-            urlStatus.textContent = 'Please enter a URL first.';
-            urlStatus.className = 'url-status invalid';
-            urlValid = false;
-            validatedUrl = null;
-            stationUrlInput.className = 'form-control url-invalid';
-            return;
-        }
-        await validateStreamUrl(url);
-    });
-
-    // Auto-check on URL input change - reset validation when URL changes
-    let urlCheckTimeout = null;
-    stationUrlInput.addEventListener('input', function () {
-        clearTimeout(urlCheckTimeout);
-        const currentUrl = this.value.trim();
-        const previousUrl = validatedUrl;
-
-        // If the URL changed from what was validated, reset validation state
-        if (previousUrl !== null && currentUrl !== previousUrl) {
-            resetValidationState();
-        }
-
-        // If URL is empty, just reset
-        if (!currentUrl) {
-            resetValidationState();
-            return;
-        }
-
-        // Auto-check with debounce
-        urlCheckTimeout = setTimeout(async () => {
-            await validateStreamUrl(currentUrl);
-        }, 800);
-    });
-
-    // Add station
-    submitStationBtn.addEventListener('click', async function () {
-        const name = stationNameInput.value.trim();
-        const url = stationUrlInput.value.trim();
-        const genreId = stationGenreSelect.value;
-        const languageId = stationLanguageSelect.value;
-        const description = stationDescriptionInput.value.trim();
-        let imageData = null;
-        const previewImg = imagePreview.querySelector('img');
-        if (previewImg) imageData = previewImg.src;
-
-        if (!name) { showToast('Station name is required.'); return; }
-        if (!url) { showToast('Stream URL is required.'); return; }
-        if (!genreId) { showToast('Please select a genre.'); return; }
-        if (!languageId) { showToast('Please select a language.'); return; }
-
-        // Check if the current URL matches the validated URL
-        if (!urlValid || validatedUrl !== url) {
-            // Try to validate the URL first
-            const isValid = await validateStreamUrl(url);
-            if (!isValid) {
-                showToast('Please provide a valid stream URL.');
-                return;
-            }
-        }
-
-        // Double-check validation state
-        if (!urlValid || validatedUrl !== url) {
-            showToast('Please wait for URL validation to complete.');
-            return;
-        }
-
-        createStation(name, url, genreId, languageId, description, imageData)
-            .then(ok => {
-                if (ok) {
-                    const modal = bootstrap.Modal.getInstance(document.getElementById('addStationModal'));
-                    modal.hide();
-                    stationNameInput.value = '';
-                    stationUrlInput.value = '';
-                    stationGenreSelect.value = '';
-                    stationLanguageSelect.value = '';
-                    stationDescriptionInput.value = '';
-                    stationImageInput.value = '';
-                    imagePreview.innerHTML = `<i class="bi bi-image placeholder-icon"></i>`;
-                    resetValidationState();
-                }
-            });
-    });
-
-    stationImageInput.addEventListener('change', function (e) {
-        const file = e.target.files[0];
-        if (!file) { imagePreview.innerHTML = `<i class="bi bi-image placeholder-icon"></i>`; return; }
-        const reader = new FileReader();
-        reader.onload = (ev) => { imagePreview.innerHTML = `<img src="${ev.target.result}" alt="preview">`; };
-        reader.readAsDataURL(file);
-    });
-
-    // Reset modal fields when opened
-    document.getElementById('addStationModal').addEventListener('show.bs.modal', function () {
+    // ---- Add station form ----
+    function resetAddStationForm() {
         stationNameInput.value = '';
         stationUrlInput.value = '';
         stationGenreSelect.value = '';
         stationLanguageSelect.value = '';
         stationDescriptionInput.value = '';
         stationImageInput.value = '';
-        imagePreview.innerHTML = `<i class="bi bi-image placeholder-icon"></i>`;
+        imagePreview.innerHTML = IMAGE_PLACEHOLDER;
         resetValidationState();
+    }
+
+    function setSubmitting(value) {
+        submitting = value;
+        submitStationBtn.disabled = value;
+        checkUrlBtn.disabled = value;
+        submitStationBtn.innerHTML = value
+            ? '<span class="spinner-border spinner-border-sm" aria-hidden="true"></span> Adding...'
+            : '<i class="bi bi-check-lg"></i> Add station';
+    }
+
+    async function submitStation() {
+        if (submitting) return;
+
+        const name = stationNameInput.value.trim();
+        const url = stationUrlInput.value.trim();
+        const genreId = stationGenreSelect.value;
+        const languageId = stationLanguageSelect.value;
+        const description = stationDescriptionInput.value.trim();
+        const imageFile = stationImageInput.files[0] || null;
+
+        if (!name) { showToast('Station name is required.'); return; }
+        if (!url) { showToast('Stream URL is required.'); return; }
+        if (!genreId) { showToast('Please select a genre.'); return; }
+        if (!languageId) { showToast('Please select a language.'); return; }
+
+        setSubmitting(true);
+        try {
+            if (!urlValid || validatedUrl !== url) {
+                const isValid = await validateStreamUrl(url);
+                if (!isValid || stationUrlInput.value.trim() !== url) {
+                    showToast('Please provide a valid stream URL.');
+                    return;
+                }
+            }
+
+            const ok = await createStation(name, url, genreId, languageId, description, imageFile);
+            if (ok) {
+                bootstrap.Modal.getOrCreateInstance(addStationModal).hide();
+                resetAddStationForm();
+            }
+        } finally {
+            setSubmitting(false);
+        }
+    }
+
+    // ---- Event binding ----
+    document.querySelectorAll('#mainPage .filter-btn').forEach(btn => {
+        btn.addEventListener('click', function () {
+            document.querySelectorAll('#mainPage .filter-btn').forEach(b => {
+                b.classList.remove('active');
+                b.setAttribute('aria-pressed', 'false');
+            });
+            this.classList.add('active');
+            this.setAttribute('aria-pressed', 'true');
+            homeFilter = this.dataset.filter;
+            homePage = 0;
+            filterLabel.textContent = homeFilter === 'famous'
+                ? '⭐ Famous Radio'
+                : homeFilter.charAt(0).toUpperCase() + homeFilter.slice(1);
+            fetchHomeStations();
+        });
     });
 
+    mainPageLink.addEventListener('click', (e) => { e.preventDefault(); showMainPage(); });
+    searchPageLink.addEventListener('click', (e) => { e.preventDefault(); showSearchPage(); });
+
+    prevPageBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (homePage > 0) { homePage--; fetchHomeStations(); }
+    });
+    nextPageBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (homePage < Math.ceil(homeTotal / LIMIT) - 1) { homePage++; fetchHomeStations(); }
+    });
+
+    searchPrevBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (searchPageNum > 0) { searchPageNum--; fetchSearchStations(); }
+    });
+    searchNextBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (searchPageNum < Math.ceil(searchTotal / LIMIT) - 1) { searchPageNum++; fetchSearchStations(); }
+    });
+
+    function newSearch() {
+        searchPageNum = 0;
+        fetchSearchStations();
+    }
+
+    searchBtn.addEventListener('click', newSearch);
+    clearSearchBtn.addEventListener('click', () => {
+        searchInput.value = '';
+        genreFilter.value = '';
+        languageFilter.value = '';
+        newSearch();
+    });
+    searchInput.addEventListener('keyup', (e) => { if (e.key === 'Enter') newSearch(); });
+    genreFilter.addEventListener('change', newSearch);
+    languageFilter.addEventListener('change', newSearch);
+
+    playPauseBtn.addEventListener('click', togglePlayPause);
+    stopBtn.addEventListener('click', stopAudio);
+    volumeSlider.addEventListener('input', function () {
+        if (audioElement) audioElement.volume = parseFloat(this.value);
+    });
+
+    pasteUrlBtn.addEventListener('click', pasteFromClipboard);
+    checkUrlBtn.addEventListener('click', () => validateStreamUrl(stationUrlInput.value.trim()));
+
+    // Re-check the URL shortly after the user stops typing.
+    stationUrlInput.addEventListener('input', function () {
+        const currentUrl = this.value.trim();
+        if (urlValid && currentUrl === validatedUrl) return;
+        resetValidationState();
+        if (!currentUrl) return;
+        urlCheckTimeout = setTimeout(() => validateStreamUrl(currentUrl), 800);
+    });
+
+    submitStationBtn.addEventListener('click', submitStation);
+
+    stationImageInput.addEventListener('change', function () {
+        const file = this.files[0];
+        imagePreview.innerHTML = IMAGE_PLACEHOLDER;
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            const img = document.createElement('img');
+            img.src = ev.target.result;
+            img.alt = 'preview';
+            imagePreview.replaceChildren(img);
+        };
+        reader.readAsDataURL(file);
+    });
+
+    addStationModal.addEventListener('show.bs.modal', resetAddStationForm);
+
+    // Space toggles playback, unless the user is typing, on a button, or in a dialog.
     document.addEventListener('keydown', (e) => {
-        if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
-        if (e.code === 'Space') { e.preventDefault(); togglePlayPause(); }
+        if (e.code !== 'Space') return;
+        const t = e.target;
+        if (t.isContentEditable || ['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON', 'A'].includes(t.tagName)) return;
+        if (t.closest && t.closest('[role="button"], .modal')) return;
+        if (document.body.classList.contains('modal-open')) return;
+        e.preventDefault();
+        togglePlayPause();
     });
 
     // ---- Init ----
     async function init() {
-        await fetchGenres();
-        await fetchLanguages();
+        [genres, languages] = await Promise.all([
+            loadList(CACHE_KEY_GENRES, '/genres', 'genres', FALLBACK_GENRES),
+            loadList(CACHE_KEY_LANGUAGES, '/languages', 'languages', FALLBACK_LANGUAGES),
+        ]);
+        genreMap = {};
+        genres.forEach(g => { genreMap[String(g.name).toLowerCase()] = g.id; });
+        fillSelect(genreFilter, 'Genre', genres);
+        fillSelect(stationGenreSelect, 'Select genre...', genres);
+        fillSelect(languageFilter, 'Language', languages);
+        fillSelect(stationLanguageSelect, 'Select language...', languages);
         showMainPage();
     }
     init();
